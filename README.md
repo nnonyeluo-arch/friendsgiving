@@ -1,30 +1,62 @@
-# Friendsgiving 2026
+# Potluck RSVP
 
-RSVP page and live potluck board for a 35-person Friendsgiving. Guests RSVP, claim a dish, and watch the board update in real time, so nobody brings the fifth mac and cheese.
+A real-time RSVP page and potluck board for small events. Guests RSVP, claim a dish, and see the board update live on every screen, so nobody brings the fifth mac and cheese.
 
-**Stack:** static HTML/CSS/JS on GitHub Pages · Supabase (Postgres + Realtime) · no build step
+**[Live demo with sample data →](https://nnonyeluo-arch.github.io/friendsgiving/#demo)**
 
-## How it works
+**Stack:** static HTML/CSS/JS on GitHub Pages · Supabase (Postgres, Row Level Security, Realtime) · no framework, no build step
 
-- **Live board.** The page subscribes to Postgres changes over Supabase Realtime. When anyone RSVPs, every open browser re-renders the potluck board and the guest list. A 60-second poll and a refresh on tab focus cover dropped sockets.
-- **One write path.** The browser can't insert, update, or delete rows directly. All writes go through `submit_rsvp()`, a `SECURITY DEFINER` Postgres function that validates input and writes both tables in one transaction.
-- **Headcount cap in the database.** The function counts confirmed guests (plus-ones included) under an advisory transaction lock, so two people can't take the last spot at the same moment. Once the event is full, a "yes" lands on the waitlist automatically.
-- **Public vs. private data.** `rsvps` (names, dishes) is readable by anyone with the link. `rsvp_private` (phone numbers, dietary notes) has RLS on and no policies, so only the hosts can read it, from the Supabase dashboard.
-- **Safe to render.** Guest-entered text goes into the DOM through `textContent`, never `innerHTML`.
-- **Host pings.** Each RSVP sends a push notification to the hosts through ntfy.
+## Features
+
+- **RSVP** with yes / maybe / can't, plus-ones, phone, and dietary notes
+- **Live potluck board** grouped by category (mains, sides, desserts, drinks). Categories still short on dishes are flagged.
+- **Headcount cap** with an automatic waitlist once the event is full
+- **Guest list** that separates confirmed, maybe, and waitlisted guests
+- **Host notifications** pushed to a phone for every RSVP, through [ntfy](https://ntfy.sh)
+- **Demo mode** (`#demo`) that runs on sample data and never writes to the database
+
+## Architecture
+
+```
+Browser (GitHub Pages)
+  │  read:  SELECT on rsvps          ──►  Postgres (RLS: public read)
+  │  write: rpc('submit_rsvp')       ──►  SECURITY DEFINER function
+  │                                         ├─ validates input
+  │                                         ├─ advisory lock + capacity check
+  │                                         ├─ insert rsvps (public)
+  │                                         └─ insert rsvp_private (hosts only)
+  └─ subscribe: postgres_changes     ◄──  Supabase Realtime
+```
+
+### Design decisions
+
+- **The browser has a single write path.** The anonymous role can't insert, update, or delete rows directly. Every write goes through `submit_rsvp()`, which validates input and writes both tables in one transaction.
+- **The capacity rule lives in the database.** The function takes a transaction-scoped advisory lock before counting confirmed guests (plus-ones included). Two people can't take the last spot at the same moment, and nothing in the client can get around the cap. Over-capacity "yes" responses are moved to `waitlist`.
+- **Public and private data live in separate tables.** Names and dishes are in `rsvps`, which anyone can read. Phone numbers and dietary notes are in `rsvp_private`, which has RLS enabled and no policies, so it can only be read from the dashboard with the service role.
+- **Guest text is rendered safely.** All user-supplied text reaches the DOM through `textContent`, never `innerHTML`.
+- **Realtime has a fallback.** The board subscribes to Postgres changes, re-polls every 60 seconds, and refreshes when the tab regains focus, so it stays current if the WebSocket drops.
+
+### Tested
+
+The SQL was tested against a local Postgres 16 instance with the `anon` and `authenticated` roles: direct writes are rejected, the private table can't be read, invalid statuses are refused, the setup script is idempotent, and the cap holds at exactly 35 heads, with RSVP number 36 going to the waitlist.
 
 ## Files
 
-| File | What it is |
+| File | Purpose |
 | --- | --- |
-| `index.html` | The whole front end |
-| `supabase/setup.sql` | Tables, row-level security, `submit_rsvp()`, realtime publication. Safe to re-run. |
-| `supabase/host-view.sql` | Hosts' full list with phones and dietary notes |
+| `index.html` | The whole front end: markup, styles, and script |
+| `supabase/setup.sql` | Tables, RLS, `submit_rsvp()`, realtime publication. Safe to re-run. |
+| `supabase/host-view.sql` | Host-only query that joins in phones and dietary notes |
 
-## Setup
+## Run your own
 
 1. Create a Supabase project and run `supabase/setup.sql` in the SQL Editor.
-2. Put the project URL and publishable key at the top of the script in `index.html`.
-3. Turn on GitHub Pages (deploy from `main`, root folder).
+2. In `index.html`, set `SUPABASE_URL`, `SUPABASE_KEY` (the publishable key), and `CAPACITY`. Set the same capacity in `submit_rsvp()`.
+3. Update the event details in the header.
+4. Turn on GitHub Pages (deploy from `main`, root folder).
 
-Add `#demo` to the URL to try the page with sample data and no database writes.
+To reset between events, run `truncate table public.rsvp_private, public.rsvps;`.
+
+---
+
+Built by Nnonyelu Okafor.
